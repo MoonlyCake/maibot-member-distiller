@@ -57,7 +57,7 @@
 
 **2. 确认谁可以管理**
 
-默认读取已安装的 [`com.moonlycake.image-generation`](https://github.com/MoonlyCake/MaiBot-Image-Generation) 插件中的 `image.owner_qq`，这位主人可以管理收集任务；主人设置变更后会自动生效。
+默认读取已安装的 `com.moonlycake.image-generation` 插件中的 `image.owner_qq`，这位主人可以管理收集任务；主人设置变更后会自动生效。
 
 如果图片插件不可用或没有配置主人，默认**不授权任何人**。需要额外授权时，在 `collector.allowed_qq` 中填写，或复制 `config.example.toml` 为 `config.toml`：
 
