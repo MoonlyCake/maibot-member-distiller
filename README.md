@@ -3,7 +3,7 @@
   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-night.svg"><img src="docs/readme/hero-day.svg" alt="麦麦插件 · 群友蒸馏：把群友说过的话，酿成麦麦的说话方式" width="100%"></picture>
 
   <p>
-    <img src="https://img.shields.io/badge/版本-1.1.0-8fd6a0?style=flat-square&labelColor=5a544a" alt="版本 1.1.0">
+    <img src="https://img.shields.io/badge/版本-1.1.1-8fd6a0?style=flat-square&labelColor=5a544a" alt="版本 1.1.1">
     <img src="https://img.shields.io/badge/MaiBot-1.3.12+-ffd84a?style=flat-square&labelColor=5a544a" alt="MaiBot 1.3.12+">
     <img src="https://img.shields.io/badge/SDK-2.12+-ffd84a?style=flat-square&labelColor=5a544a" alt="SDK 2.12+">
     <img src="https://img.shields.io/badge/大模型调用-0-f08a5d?style=flat-square&labelColor=5a544a" alt="不调用大模型">
@@ -57,9 +57,7 @@
 
 **2. 确认谁可以管理**
 
-默认读取已安装的 `com.moonlycake.image-generation` 插件中的 `image.owner_qq`，这位主人可以管理收集任务；主人设置变更后会自动生效。
-
-如果图片插件不可用或没有配置主人，默认**不授权任何人**。需要额外授权时，在 `collector.allowed_qq` 中填写，或复制 `config.example.toml` 为 `config.toml`：
+插件默认不设置主人或管理员，因此**不授权任何人**。请在 `collector.allowed_qq` 中填写可以管理插件的 QQ 号，或复制 `config.example.toml` 为 `config.toml` 后进行配置：
 
 ```toml
 [plugin]
@@ -67,17 +65,17 @@ enabled = true
 config_version = "1.0.0"
 
 [collector]
-allowed_qq = []  # 额外允许管理的 QQ 号，如 ["123456789"]
+allowed_qq = ["123456789"]  # 换成允许管理插件的 QQ 号
 ```
 
 > [!NOTE]
-> QQ 号必须写成纯数字字符串。白名单为空时，只有图片插件中配置的主人可以管理。
+> QQ 号必须写成纯数字字符串。白名单为空时，任何人都不能管理插件；需要多位管理员时，可以填写多个 QQ 号。
 
 <br>
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/sec-usage-night.svg"><img src="docs/readme/sec-usage-day.svg" alt="指令 · USAGE" width="100%"></picture>
 
-由主人或已授权的 QQ，在机器人私聊或任意可用群聊中发送（把 `123456789` 换成目标 QQ；导出仅支持私聊）：
+由白名单中的 QQ，在机器人私聊或任意可用群聊中发送纯文字指令（把 `123456789` 换成目标 QQ；导出仅支持私聊）：
 
 | 指令 | 作用 |
 | :--- | :--- |

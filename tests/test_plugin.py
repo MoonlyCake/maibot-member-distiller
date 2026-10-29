@@ -37,13 +37,14 @@ class MetadataTest(TestCase):
     def test_sdk_registration(self):
         components = MemberDistiller().get_components()
         hooks = [item for item in components if item["type"] == "HOOK_HANDLER"]
-        hook = next(item for item in hooks if item["metadata"]["mode"] == "blocking")
         observer = next(item for item in hooks if item["metadata"]["mode"] == "observe")
         cmd = next(item for item in components if item["type"] == "COMMAND")
-        self.assertEqual(hook["metadata"]["hook"], "chat.receive.after_process")
-        self.assertEqual(hook["metadata"]["mode"], "blocking")
+        self.assertEqual(len(hooks), 1)
         self.assertEqual(observer["metadata"]["hook"], "chat.receive.after_process")
-        self.assertTrue(re.fullmatch(cmd["metadata"]["command_pattern"], "\u2063member-distiller:/distill add 200"))
+        pattern = cmd["metadata"]["command_pattern"]
+        self.assertTrue(re.fullmatch(pattern, "/distill add 200"))
+        self.assertFalse(re.search(pattern, "\u2063member-distiller:/distill add 200"))
+        self.assertFalse(re.search(pattern, "引用 /distill add 200"))
 
 
 class PluginTest(IsolatedAsyncioTestCase):
@@ -70,8 +71,6 @@ class PluginTest(IsolatedAsyncioTestCase):
 
     async def command(self, text, user="900", group="100", **kwargs):
         msg = message(user=user, group=group, text=text)
-        routed = await self.plugin.route_command(message=msg)
-        msg = routed.get("modified_kwargs", {}).get("message", msg)
         return await self.plugin.command(stream_id="session-100", platform=kwargs.get("platform", "qq"),
                                          user_id=kwargs.get("user_id", user), group_id=kwargs.get("group_id", group or ""),
                                          message=msg)
@@ -131,7 +130,7 @@ class PluginTest(IsolatedAsyncioTestCase):
         self.assertTrue(self.plugin._store.is_enabled("201"))
         self.assertTrue(exports[0].exists())
 
-    async def test_owner_follows_image_plugin_and_extra_admins(self):
+    async def test_no_default_owner_and_configured_admins_only(self):
         await self.plugin.on_unload()
         plugin = MemberDistiller()
         plugin._set_context(self.ctx)
@@ -140,37 +139,38 @@ class PluginTest(IsolatedAsyncioTestCase):
         self.plugin = plugin
         self.assertEqual(self.plugin.config.collector.allowed_qq, [])
 
+        # Another plugin's owner is not an implicit authority for this plugin.
         self.ctx.config.get_plugin.return_value = {"image": {"owner_qq": "900"}}
-        self.assertTrue((await self.command("/distill add 200", user="900", group=None))[0])
+        self.assertFalse((await self.command("/distill add 200", user="900", group=None))[0])
         self.assertFalse((await self.command("/distill add 201", user="901", group=None))[0])
-        self.assertTrue(self.plugin._store.is_enabled("200"))
+        self.assertFalse(self.plugin._store.is_enabled("200"))
         self.assertFalse(self.plugin._store.is_enabled("201"))
-        self.ctx.config.get_plugin.assert_awaited_with("com.moonlycake.image-generation")
+        self.ctx.config.get_plugin.assert_not_awaited()
 
-        # The source owner is read afresh so changing it revokes the old owner.
-        self.ctx.config.get_plugin.return_value = {"image": {"owner_qq": "901"}}
-        self.assertFalse((await self.command("/distill add 202", user="900", group=None))[0])
+        plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"},
+                                  "collector": {"allowed_qq": ["901", "qq:900", ""]}})
         self.assertTrue((await self.command("/distill add 202", user="901", group=None))[0])
+        self.assertFalse((await self.command("/distill add 203", user="900", group=None))[0])
 
         plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"},
                                   "collector": {"allowed_qq": ["902"]}})
-        self.assertTrue((await self.command("/distill add 203", user="901", group=None))[0])
+        self.assertFalse((await self.command("/distill add 203", user="901", group=None))[0])
         self.assertTrue((await self.command("/distill add 204", user="902", group=None))[0])
         self.assertFalse((await self.command("/distill add 205", user="900", group=None))[0])
+        self.ctx.config.get_plugin.assert_not_awaited()
 
-    async def test_owner_missing_or_unreadable_denies_without_extras(self):
+    async def test_empty_and_invalid_allowlist_denies(self):
         await self.plugin.on_unload()
         plugin = MemberDistiller()
         plugin._set_context(self.ctx)
         plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"}})
         await plugin.on_load()
         self.plugin = plugin
-        for source in ({}, {"image": {}}, {"image": {"owner_qq": ""}},
-                       {"image": {"owner_qq": "qq:900"}}, None):
-            self.ctx.config.get_plugin.return_value = source
+        for allowed in ([], ["qq:900"], [""], [" "]):
+            plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"},
+                                      "collector": {"allowed_qq": allowed}})
             self.assertFalse((await self.command("/distill add 200", user="900", group=None))[0])
-        self.ctx.config.get_plugin.side_effect = RuntimeError("config unavailable")
-        self.assertFalse((await self.command("/distill add 200", user="900", group=None))[0])
+        self.ctx.config.get_plugin.assert_not_awaited()
         self.assertFalse(self.plugin._store.is_enabled("200"))
 
     async def test_forged_source_and_quoted_command_do_not_execute(self):
@@ -180,9 +180,23 @@ class PluginTest(IsolatedAsyncioTestCase):
             {"type": "reply", "data": {"target_message_content": "/distill add 200"}},
             {"type": "text", "data": "普通聊天"},
         ])
-        routed = await self.plugin.route_command(message=quoted)
-        self.assertNotIn("modified_kwargs", routed)
+        quoted["processed_plain_text"] = "/distill add 200"
+        result = await self.plugin.command(stream_id="session-100", platform="qq", user_id="900",
+                                           group_id="100", message=quoted)
+        self.assertEqual(result[::2], (False, False))
+        self.assertEqual(quoted["processed_plain_text"], "/distill add 200")
+        self.assertEqual(quoted["raw_message"][1]["data"], "普通聊天")
         self.assertFalse(self.plugin._store.is_enabled("200"))
+
+    async def test_plain_command_is_not_rewritten_and_only_authorized_user_intercepts(self):
+        self.assertFalse((await self.command("/distill add 200", user="901", group=None))[2])
+        msg = message(user="900", group=None, text="/distill add 200")
+        original = msg.copy()
+        result = await self.plugin.command(stream_id="session-100", platform="qq", user_id="900",
+                                           group_id="", message=msg)
+        self.assertTrue(result[0])
+        self.assertTrue(result[2])
+        self.assertEqual(msg, original)
 
     async def test_context_scoped_limited_anonymous_and_private_export(self):
         await self.plugin.on_receive(message=message(user="301", mid="pre", text="启用之前"))

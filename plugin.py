@@ -13,7 +13,6 @@ from maibot_sdk.types import ErrorPolicy, HookMode
 
 from .storage import DistillStore
 
-_MARKER = "\u2063member-distiller:"
 _COMMAND = re.compile(r"^/distill(?:\s+(?P<action>add|stop|status|export|delete)(?:\s+(?P<qq>[0-9]+))?)?\s*$", re.IGNORECASE)
 _ID = re.compile(r"^[0-9]+$")
 
@@ -73,7 +72,7 @@ class PluginSettings(PluginConfigBase):
 
 
 class CollectorSettings(PluginConfigBase):
-    allowed_qq: list[str] = Field(default_factory=list, description="额外允许管理的 QQ；留空时只允许主人")
+    allowed_qq: list[str] = Field(default_factory=list, description="允许管理的 QQ；留空时拒绝所有人")
 
 
 class DistillerConfig(PluginConfigBase):
@@ -114,17 +113,7 @@ class MemberDistiller(MaiBotPlugin):
     async def _authorized(self, user_id: str) -> bool:
         allowed = {str(qq).strip() for qq in self.config.collector.allowed_qq
                    if _ID.fullmatch(str(qq).strip())}
-        if user_id in allowed:
-            return True
-        try:
-            config = await self.ctx.config.get_plugin("com.moonlycake.image-generation")
-        except Exception as exc:
-            self.ctx.logger.warning("无法读取图片插件的主人配置: %s", exc)
-            return False
-        if not isinstance(config, dict) or not isinstance(config.get("image"), dict):
-            return False
-        owner = str(config["image"].get("owner_qq") or "").strip()
-        return bool(_ID.fullmatch(owner) and user_id == owner)
+        return user_id in allowed
 
     async def on_unload(self) -> None:
         if self._cleanup_task is not None:
@@ -140,18 +129,6 @@ class MemberDistiller(MaiBotPlugin):
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         """宿主已更新配置实例；无需自行重复写入或触发其他操作。"""
         del scope, config_data, version
-
-    @HookHandler("chat.receive.after_process", name="member_distiller_route",
-                 description="将真实的管理命令送入命令链", mode=HookMode.BLOCKING,
-                 timeout_ms=1500, error_policy=ErrorPolicy.SKIP)
-    async def route_command(self, **kwargs: Any) -> dict[str, Any]:
-        message = kwargs.get("message")
-        if (self.config.plugin.enabled and _command_parts(message) is not None
-                and _COMMAND.fullmatch(_actual_text(message))):
-            modified = dict(message)
-            modified["processed_plain_text"] = _MARKER + _actual_text(message)
-            return {"action": "continue", "modified_kwargs": {**kwargs, "message": modified}}
-        return {"action": "continue"}
 
     @HookHandler("chat.receive.after_process", name="member_distiller_collect",
                  description="收集目标 QQ 在各群本条消息中的文字", mode=HookMode.OBSERVE,
@@ -184,7 +161,7 @@ class MemberDistiller(MaiBotPlugin):
             self.ctx.logger.error(f"群友资料收集失败，群 {group_id}，QQ {user_id}: {exc}")
 
     @Command("member_distiller", description="管理指定 QQ 在各群的蒸馏资料",
-             pattern=r"(?i)^\u2063member-distiller:/distill(?:\s+(?P<action>add|stop|status|export|delete)(?:\s+(?P<qq>[0-9]+))?)?\s*$")
+             pattern=r"(?i)^/distill(?:\s+(?P<action>add|stop|status|export|delete)(?:\s+(?P<qq>[0-9]+))?)?\s*$")
     async def command(self, stream_id: str = "", platform: str = "", user_id: str = "",
                       group_id: str = "", matched_groups: dict[str, Any] | None = None,
                       **kwargs: Any) -> tuple[bool, str, bool]:
@@ -196,9 +173,9 @@ class MemberDistiller(MaiBotPlugin):
         if (not self.config.plugin.enabled or self._store is None or not stream_id or parts is None
                 or platform != "qq" or parts[0] != str(group_id) or parts[1] != str(user_id)
                 or match is None):
-            return False, "消息来源或命令无效", True
+            return False, "消息来源或命令无效", False
         if not await self._authorized(user_id):
-            return False, "未授权", True
+            return False, "未授权", False
         action = (match.group("action") or "").lower()
         qq = match.group("qq") or ""
         if not action or not qq:

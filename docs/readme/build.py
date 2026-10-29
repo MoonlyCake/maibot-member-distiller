@@ -203,7 +203,7 @@ def pixel_heart(x: float, y: float, px: float, fill: str) -> str:
 
 
 BAR = "MAIBOT PLUGIN // MEMBER DISTILLER"
-VERSION = "V1.1.0"
+VERSION = "V1.1.1"
 
 
 def hero(t: dict) -> str:
