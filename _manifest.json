@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "com.moonlycake.member-distiller",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "群友蒸馏资料收集",
-  "description": "按 QQ 收集所有可接收群聊此后的文字，并将原始发言导出为本机文本。",
+  "description": "按 QQ 收集群聊发言及少量匿名上下文，并导出本机文本。",
   "author": {"name": "MoonlyCake", "url": "https://github.com/MoonlyCake"},
   "urls": {"repository": "https://github.com/MoonlyCake/maibot-member-distiller"},
   "license": "MIT",

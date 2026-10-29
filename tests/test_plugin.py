@@ -1,5 +1,6 @@
 """Tests exercise the installed SDK and the host's serialized message contract."""
 from datetime import datetime
+import asyncio
 import os
 import logging
 from pathlib import Path
@@ -9,7 +10,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from maibot_member_distiller.plugin import MemberDistiller
@@ -108,12 +109,15 @@ class PluginTest(IsolatedAsyncioTestCase):
         self.assertIn("目标 QQ：200", content)
         for value in ("第一句", "另一群同消息ID", "我自己的回答", "来源群：100", "来源群：101"):
             self.assertIn(value, content)
-        for other in ("duplicate", "other user", "private", "other platform", "another command",
+        self.assertIn("[上下文：其他群成员，匿名", content)
+        self.assertIn("other user", content)
+        for other in ("duplicate", "private", "other platform", "another command",
                       "do not include", "image content", "另一目标"):
             self.assertNotIn(other, content)
         self.assertTrue((await self.command("/distill stop 200", group="101"))[0])
         await self.plugin.on_receive(message=message(group="102", mid="10", text="after stop"))
         self.assertEqual(self.plugin._store.count("200"), 3)
+        await self.plugin.on_unload()
         self.plugin = await self.new_plugin()
         self.assertFalse(self.plugin._store.is_enabled("200"))
         self.assertTrue(self.plugin._store.is_enabled("201"))
@@ -128,6 +132,7 @@ class PluginTest(IsolatedAsyncioTestCase):
         self.assertTrue(exports[0].exists())
 
     async def test_owner_follows_image_plugin_and_extra_admins(self):
+        await self.plugin.on_unload()
         plugin = MemberDistiller()
         plugin._set_context(self.ctx)
         plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"}})
@@ -154,6 +159,7 @@ class PluginTest(IsolatedAsyncioTestCase):
         self.assertFalse((await self.command("/distill add 205", user="900", group=None))[0])
 
     async def test_owner_missing_or_unreadable_denies_without_extras(self):
+        await self.plugin.on_unload()
         plugin = MemberDistiller()
         plugin._set_context(self.ctx)
         plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"}})
@@ -177,3 +183,63 @@ class PluginTest(IsolatedAsyncioTestCase):
         routed = await self.plugin.route_command(message=quoted)
         self.assertNotIn("modified_kwargs", routed)
         self.assertFalse(self.plugin._store.is_enabled("200"))
+
+    async def test_context_scoped_limited_anonymous_and_private_export(self):
+        await self.plugin.on_receive(message=message(user="301", mid="pre", text="启用之前"))
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        await self.plugin.on_receive(message=message(user="301", mid="a", text="较早内容"))
+        await self.plugin.on_receive(message=message(user="302", mid="b", text="上下文甲"))
+        await self.plugin.on_receive(message=message(user="303", mid="c", text="上下文乙"))
+        await self.plugin.on_receive(message=message(user="304", group="101", mid="d", text="另一群上下文"))
+        await self.plugin.on_receive(message=message(user="305", group=None, mid="p", text="私聊内容"))
+        await self.plugin.on_receive(message=message(user="306", mid="cmd", text="/命令"))
+        await self.plugin.on_receive(message=message(user="200", mid="target", text="目标回答"))
+        self.assertEqual(self.plugin._store.count("200"), 1)
+
+        self.assertFalse((await self.command("/distill export 200", group="100"))[0])
+        self.assertIn("私聊", self.send.await_args.args[0])
+        self.assertFalse((Path(self.tmp.name) / "exports").exists())
+        self.assertTrue((await self.command("/distill export 200", group=None))[0])
+        exported = next((Path(self.tmp.name) / "exports").glob("*.txt")).read_text(encoding="utf-8")
+        self.assertIn("[上下文：其他群成员，匿名", exported)
+        self.assertIn("上下文甲", exported)
+        self.assertIn("上下文乙", exported)
+        self.assertIn("[目标发言]\n目标回答", exported)
+        for excluded in ("启用之前", "较早内容", "另一群上下文", "私聊内容", "/命令", "302", "303"):
+            self.assertNotIn(excluded, exported)
+
+        # Stopping and restarting must not retain old context for this target.
+        self.assertTrue((await self.command("/distill stop 200", group=None))[0])
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        await self.plugin.on_receive(message=message(user="200", mid="fresh", text="重新开始"))
+        self.assertTrue((await self.command("/distill export 200", group=None))[0])
+        newest = max((Path(self.tmp.name) / "exports").glob("*.txt"), key=lambda p: p.stat().st_mtime_ns)
+        tail = newest.read_text(encoding="utf-8").split("--- 发言 2", 1)[1]
+        self.assertNotIn("上下文甲", tail)
+        self.assertNotIn("上下文乙", tail)
+
+    async def test_config_update_hook_has_no_side_effects(self):
+        await self.plugin.on_config_update("self", {"collector": {"allowed_qq": ["901"]}}, "1.0")
+        self.assertEqual(self.plugin.config.collector.allowed_qq, ["900"])
+
+    async def test_unload_cancels_cleanup_and_discards_context(self):
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        await self.plugin.on_receive(message=message(user="301", mid="c", text="背景"))
+        store = self.plugin._store
+        cleanup_task = self.plugin._cleanup_task
+        self.assertTrue(store._context)
+        await self.plugin.on_unload()
+        self.assertTrue(cleanup_task.done())
+        self.assertFalse(store._context)
+        self.assertIsNone(self.plugin._store)
+
+    async def test_cleanup_task_prunes_without_new_messages(self):
+        self.plugin._cleanup_task.cancel()
+        await asyncio.gather(self.plugin._cleanup_task, return_exceptions=True)
+        self.plugin._cleanup_task = None
+        self.plugin._store.prune_context = MagicMock()
+        with patch("maibot_member_distiller.plugin.asyncio.sleep", new_callable=AsyncMock,
+                   side_effect=[None, asyncio.CancelledError()]):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.plugin._prune_context_periodically()
+        self.plugin._store.prune_context.assert_called_once_with()

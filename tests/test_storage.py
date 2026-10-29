@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -110,6 +111,102 @@ class StorageTests(unittest.TestCase):
         link.symlink_to(self.db_path)
         with self.assertRaises(ValueError):
             DistillStore(link)
+
+    def test_context_is_per_target_group_recent_and_anonymous(self):
+        store = self.store
+        with patch("storage.time.time", return_value=1000.0):
+            store.set_target("target", True)
+            store.set_target("other_target", True)
+            # This input predates the target and must never be retained.
+            store.observe("g1", "sender1", "a", "before enabling", 999, received_at=999)
+            store.observe("g1", "sender1", "b", "too old", 1001, received_at=1001)
+            store.observe("g2", "sender2", "c", "wrong group", 1301, received_at=1301)
+        with patch("storage.time.time", return_value=1305.0):
+            store.observe("g1", "sender3", "d", "context one", 1302, received_at=1302)
+            store.observe("g1", "target", "own", "target earlier", 1302, received_at=1302.2)
+            store.observe("g1", "sender4", "e", "context two", 1303, received_at=1303)
+            self.assertTrue(store.observe("g1", "target", "f", "target response", 1304, received_at=1304))
+            self.assertFalse(store.observe("g1", "target", "f", "duplicate", 1304, received_at=1304))
+        out = self.root / "exports" / "context.txt"
+        store.export_text("target", out)
+        data = out.read_text(encoding="utf-8")
+        self.assertIn("context one", data)
+        self.assertIn("context two", data)
+        self.assertIn("[目标发言]\ntarget response", data)
+        self.assertIn("上下文：其他群成员，匿名", data)
+        for excluded in ("before enabling", "too old", "wrong group", "sender3", "sender4"):
+            self.assertNotIn(excluded, data)
+        with sqlite3.connect(self.db_path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM message_context WHERE target_message_id='f'").fetchone()[0], 2)
+            columns = [row[1] for row in db.execute("PRAGMA table_info(message_context)")]
+            self.assertNotIn("user_id", columns)
+        self.assertEqual(store.delete_messages("target"), 2)
+        with sqlite3.connect(self.db_path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM message_context").fetchone()[0], 0)
+
+    def test_context_backlog_out_of_order_stop_restart_and_capacity(self):
+        store = self.store
+        with patch("storage.time.time", return_value=1000.0):
+            store.set_target("t", True)
+            store.observe("g", "u", "future", "future", 1002, received_at=1002)
+            store.observe("g", "u", "early", "earlier same second", 1001, received_at=1001.1)
+            store.observe("g", "t", "target", "answer", 1001, received_at=1001.2)
+            out = self.root / "c.txt"
+            store.export_text("t", out)
+            text = out.read_text(encoding="utf-8")
+            self.assertIn("earlier same second", text)
+            self.assertNotIn("future", text)
+            store.set_target("t", False)
+            self.assertEqual(len(store._context), 0)
+            store.set_target("t", True)
+            store.observe("g", "t", "after", "after resume", 1003, received_at=1003)
+            store.export_jsonl("t", self.root / "c.jsonl")
+            rows = [json.loads(line) for line in (self.root / "c.jsonl").read_text().splitlines()]
+            self.assertEqual(rows[-1]["context"], [])
+            for n in range(300):
+                store.observe(str(n), "u", str(n), "value", 1004, received_at=1004)
+            self.assertLessEqual(len(store._context), 256)
+        # Restart deliberately forgets ephemeral other-user text.
+        resumed = DistillStore(self.db_path)
+        self.assertEqual(len(resumed._context), 0)
+
+    def test_context_pruning_and_unload_clear(self):
+        store = self.store
+        with patch("storage.time.time", return_value=1000.0):
+            store.set_target("t", True)
+            store.observe("g", "u", "1", "old", 1001, received_at=1001)
+            store.observe("g", "u", "2", "new", 1050, received_at=1050)
+        store.prune_context(now=1302)
+        self.assertEqual([entry["text"] for entry in store._context[("t", "g")]], ["new"])
+        store.clear_context()
+        self.assertEqual(len(store._context), 0)
+
+    def test_long_context_is_explicitly_truncated(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.store.set_target("t", True)
+            self.store.observe("g", "u", "m", "x" * 2100, 1001, received_at=1001)
+            self.store.observe("g", "t", "reply", "answer", 1002, received_at=1002)
+        out = self.root / "truncated.txt"
+        self.store.export_text("t", out)
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("（上下文过长，此处截断）", text)
+        self.assertNotIn("x" * 2001, text)
+
+    def test_existing_database_is_upgraded_without_losing_messages(self):
+        old = self.root / "old.sqlite3"
+        with sqlite3.connect(old) as db:
+            db.executescript('''
+                CREATE TABLE targets (user_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, updated_at REAL NOT NULL);
+                CREATE TABLE messages (group_id TEXT NOT NULL, user_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL, text TEXT NOT NULL, PRIMARY KEY (group_id, message_id));
+                INSERT INTO targets VALUES ('t', 1, 1);
+                INSERT INTO messages VALUES ('g', 't', 'm', 2, 'old message');
+            ''')
+        upgraded = DistillStore(old)
+        out = self.root / "legacy.txt"
+        self.assertEqual(upgraded.export_text("t", out), 1)
+        self.assertIn("old message", out.read_text(encoding="utf-8"))
+        self.assertTrue(upgraded.is_enabled("t"))
 
 
 if __name__ == "__main__":

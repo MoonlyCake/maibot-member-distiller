@@ -89,6 +89,7 @@ class MemberDistiller(MaiBotPlugin):
         self._store: DistillStore | None = None
         self._data_dir: Path | None = None
         self._active_users: set[str] = set()
+        self._cleanup_task: asyncio.Task[None] | None = None
         # 命令和采集共用锁，停止或删除完成后，先前排队的写入不会重新写入已删除数据。
         self._lock = asyncio.Lock()
 
@@ -97,7 +98,18 @@ class MemberDistiller(MaiBotPlugin):
         self._store = await asyncio.to_thread(DistillStore, self._data_dir / "member_distiller.sqlite3")
         targets = await asyncio.to_thread(self._store.list_targets)
         self._active_users = {str(target["user_id"]) for target in targets if target["enabled"]}
+        self._cleanup_task = asyncio.create_task(self._prune_context_periodically())
         self.ctx.logger.info("群友蒸馏资料插件已加载")
+
+    async def _prune_context_periodically(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                async with self._lock:
+                    if self._store is not None:
+                        await asyncio.to_thread(self._store.prune_context)
+            except Exception as exc:
+                self.ctx.logger.error("清理群聊上下文缓存失败: %s", exc)
 
     async def _authorized(self, user_id: str) -> bool:
         allowed = {str(qq).strip() for qq in self.config.collector.allowed_qq
@@ -115,7 +127,19 @@ class MemberDistiller(MaiBotPlugin):
         return bool(_ID.fullmatch(owner) and user_id == owner)
 
     async def on_unload(self) -> None:
-        pass
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            await asyncio.gather(self._cleanup_task, return_exceptions=True)
+            self._cleanup_task = None
+        async with self._lock:
+            if self._store is not None:
+                await asyncio.to_thread(self._store.clear_context)
+                self._store = None
+            self._active_users.clear()
+
+    async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
+        """宿主已更新配置实例；无需自行重复写入或触发其他操作。"""
+        del scope, config_data, version
 
     @HookHandler("chat.receive.after_process", name="member_distiller_route",
                  description="将真实的管理命令送入命令链", mode=HookMode.BLOCKING,
@@ -142,7 +166,7 @@ class MemberDistiller(MaiBotPlugin):
             return
         group_id, user_id, message_id = parts
         text = _actual_text(message)
-        if (user_id not in self._active_users or not text or text.startswith("/")
+        if (not self._active_users or not text or text.startswith("/")
                 or message.get("is_notify") or message.get("is_command")):
             return
         # 接收时间是主程序记录的时间，不用处理时间补造，以免收进启动前积压的消息。
@@ -153,8 +177,9 @@ class MemberDistiller(MaiBotPlugin):
                 raise ValueError("缺少消息接收时间或上游时间")
             received_seconds = datetime.fromisoformat(received_at).timestamp()
             async with self._lock:
-                await asyncio.to_thread(store.record, group_id, user_id, message_id, text,
-                                        timestamp, received_at=received_seconds)
+                if self._store is store and self._active_users:
+                    await asyncio.to_thread(store.observe, group_id, user_id, message_id, text,
+                                            timestamp, received_at=received_seconds)
         except Exception as exc:
             self.ctx.logger.error(f"群友资料收集失败，群 {group_id}，QQ {user_id}: {exc}")
 
@@ -180,6 +205,9 @@ class MemberDistiller(MaiBotPlugin):
             await self.ctx.send.text("用法：/distill add|stop|status|export|delete QQ号\n"
                                      "收集目标 QQ 在所有可接收群聊的今后文字；delete 会停止并删除已收集记录。", stream_id)
             return True, "已发送用法", True
+        if action == "export" and group_id:
+            await self.ctx.send.text("为避免在群聊暴露本机路径，请在私聊中发送导出命令。", stream_id)
+            return False, "请在私聊导出", True
         store = self._store
         try:
             async with self._lock:
