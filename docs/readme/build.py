@@ -185,8 +185,8 @@ def illustration(t: dict) -> str:
         f'<g transform="rotate(-8 790 262)">'
         f'<rect x="764" y="232" width="56" height="62" fill="{t["paper"]}" stroke="{line}" stroke-width="2"/>'
         f'<path d="M806 232v12h14" fill="{t["window"]}" stroke="{line}" stroke-width="2"/>'
-        + pixel_text("TXT", 771, 238, 2, CORAL, tracking=0.8, bold=True)
-        + "".join(f'<rect x="772" y="{256 + i * 8}" width="{40 - (i % 2) * 12}" height="3" fill="{t["lo"]}"/>' for i in range(4))
+        + pixel_text("TXT", 771, 246, 2, CORAL, tracking=0.8, bold=True)
+        + "".join(f'<rect x="772" y="{266 + i * 7}" width="{40 - (i % 2) * 12}" height="3" fill="{t["lo"]}"/>' for i in range(4))
         + "</g>",
         f'<path d="M760 262 q 6 -2 8 -8" fill="none" stroke="{line}" stroke-width="2" stroke-dasharray="3 4"/>',
     ]
@@ -203,6 +203,7 @@ def pixel_heart(x: float, y: float, px: float, fill: str) -> str:
 
 
 BAR = "MAIBOT PLUGIN // MEMBER DISTILLER"
+VERSION = "V1.0.0"
 
 
 def hero(t: dict) -> str:
@@ -225,6 +226,7 @@ def hero(t: dict) -> str:
         f'<rect x="42" y="84" width="10" height="10" fill="{CORAL}"/>',
         f'<text class="c" x="62" y="95" font-size="15" letter-spacing="3" fill="{t["sub"]}">群友蒸馏</text>',
         pixel_text("MEMBER", 146, 84, 1.6, t["sub"], tracking=1.2, bold=True),
+        pixel_text(VERSION, 532 - pixel_width(VERSION, 1.6, 1.2, True), 84, 1.6, t["lo"], tracking=1.2, bold=True),
         pixel_text(title, 42, 116, px, t["ink"], tracking=0.8, bold=True),
         tri_stripe(42, 182, pixel_width(title, px, 0.8, bold=True), 5),
         f'<text class="c" x="42" y="222" font-size="20" fill="{t["ink"]}">把群友说过的话，酿成麦麦的说话方式</text>',
@@ -253,13 +255,13 @@ SECTIONS = {
 def section(key: str, t: dict) -> str:
     tag, title, led = SECTIONS[key]
     tag_width = pixel_width(tag, 2, 1.5, True) + 34
-    title_width = len(title) * 16 + 28
+    title_width = len(title) * 18 + 30
     vent_x = tag_width + title_width
     body = (
         bevel(1, 1, 858, 40, t, drop=4)
         + f'<rect x="2" y="2" width="{tag_width:.0f}" height="38" fill="{t["tag_bg"]}"/>'
         + pixel_text(tag, 17, 14, 2, t["tag_fg"], tracking=1.5, bold=True)
-        + f'<text class="c" x="{tag_width + 14:.0f}" y="27" font-size="16" fill="{t["ink"]}">{title}</text>'
+        + f'<text class="c" x="{tag_width + 14:.0f}" y="28" font-size="18" fill="{t["ink"]}">{title}</text>'
         + f'<rect x="{vent_x:.0f}" y="11" width="{816 - vent_x:.0f}" height="20" fill="url(#vent)" opacity=".85"/>'
         + f'<rect x="832" y="15" width="11" height="11" fill="{led}" stroke="{t["line"]}" stroke-width="1.2"/>'
     )
