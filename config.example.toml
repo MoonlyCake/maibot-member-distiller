@@ -1,0 +1,6 @@
+[plugin]
+enabled = false
+config_version = "1.0.0"
+
+[collector]
+allowed_qq = []

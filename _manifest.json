@@ -1,0 +1,17 @@
+{
+  "manifest_version": 2,
+  "id": "com.moonlycake.member-distiller",
+  "version": "1.0.0",
+  "name": "群友蒸馏资料收集",
+  "description": "按 QQ 收集所有可接收群聊此后的文字，并将原始发言导出为本机文本。",
+  "author": {"name": "MoonlyCake", "url": "https://github.com/MoonlyCake"},
+  "urls": {"repository": "https://github.com/MoonlyCake/maibot-member-distiller"},
+  "license": "MIT",
+  "host_application": {"min_version": "1.3.12", "max_version": "1.3.99"},
+  "sdk": {"min_version": "2.12.0", "max_version": "2.16.99"},
+  "plugin_type": "extension",
+  "dependencies": [],
+  "capabilities": ["send.text", "config.get_plugin"],
+  "display": {"icon": {"type": "lucide", "value": "messages-square"}},
+  "i18n": {"default_locale": "zh-CN"}
+}
