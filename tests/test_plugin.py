@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
@@ -37,10 +38,10 @@ class MetadataTest(TestCase):
     def test_sdk_registration(self):
         components = MemberDistiller().get_components()
         hooks = [item for item in components if item["type"] == "HOOK_HANDLER"]
-        observer = next(item for item in hooks if item["metadata"]["mode"] == "observe")
         cmd = next(item for item in components if item["type"] == "COMMAND")
-        self.assertEqual(len(hooks), 1)
-        self.assertEqual(observer["metadata"]["hook"], "chat.receive.after_process")
+        self.assertEqual({item["metadata"]["hook"] for item in hooks},
+                         {"chat.receive.after_process", "chat.command.before_execute"})
+        self.assertTrue(all(item["metadata"]["mode"] == "observe" for item in hooks))
         pattern = cmd["metadata"]["command_pattern"]
         self.assertTrue(re.fullmatch(pattern, "/distill add 200"))
         self.assertFalse(re.search(pattern, "\u2063member-distiller:/distill add 200"))
@@ -53,7 +54,8 @@ class PluginTest(IsolatedAsyncioTestCase):
         self.send = AsyncMock(return_value=True)
         self.ctx = SimpleNamespace(paths=SimpleNamespace(data_dir=self.tmp.name),
                                    send=SimpleNamespace(text=self.send),
-                                   config=SimpleNamespace(get_plugin=AsyncMock(return_value={})),
+                                   config=SimpleNamespace(get_plugin=AsyncMock(return_value={}),
+                                                          get=AsyncMock(return_value="999")),
                                    logger=logging.getLogger("test-distill"))
         self.plugin = await self.new_plugin()
 
@@ -128,7 +130,9 @@ class PluginTest(IsolatedAsyncioTestCase):
         self.assertFalse(self.plugin._store.is_enabled("200"))
         self.assertEqual(self.plugin._store.count("201"), 1)
         self.assertTrue(self.plugin._store.is_enabled("201"))
-        self.assertTrue(exports[0].exists())
+        # 200's exports go with its data; 201 keeps its row and records.
+        self.assertFalse(exports[0].exists())
+        self.assertEqual([item["user_id"] for item in self.plugin._store.list_targets()], ["201"])
 
     async def test_no_default_owner_and_configured_admins_only(self):
         await self.plugin.on_unload()
@@ -257,3 +261,94 @@ class PluginTest(IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await self.plugin._prune_context_periodically()
         self.plugin._store.prune_context.assert_called_once_with()
+
+    async def test_bot_messages_and_ignored_text_are_not_collected(self):
+        self.plugin.set_plugin_config({"plugin": {"enabled": True, "config_version": "1.0.0"},
+                                       "collector": {"allowed_qq": ["900"], "ignore_words": ["违禁"],
+                                                     "ignore_regex": ["^#", "("]}})
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        await self.plugin.on_receive(message=message(user="999", mid="bot", text="机器人回复"))
+        await self.plugin.on_receive(message=message(user="301", mid="ban", text="含违禁词"))
+        await self.plugin.on_receive(message=message(user="200", mid="cmd", text="#签到"))
+        await self.plugin.on_receive(message=message(user="200", mid="ok", text="正常发言"))
+        self.assertEqual(self.plugin._store.count("200"), 1)
+        self.assertFalse(self.plugin._store._context)
+
+    async def test_registered_command_is_removed_from_corpus(self):
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        msg = message(user="200", mid="sign", text="签到")
+        await self.plugin.on_receive(message=msg)
+        self.assertEqual(self.plugin._store.count("200"), 1)
+        await self.plugin.on_command_matched(message=msg, command_name="sign", plugin_id="x", matched_groups={})
+        self.assertEqual(self.plugin._store.count("200"), 0)
+
+    async def test_list_is_private_and_add_is_idempotent(self):
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        self.assertIn("已在收集中", self.send.await_args.args[0])
+        self.assertFalse((await self.command("/distill list", group="100"))[0])
+        self.assertNotIn("200", self.send.await_args.args[0])
+        self.assertTrue((await self.command("/distill list", group=None))[0])
+        self.assertIn("QQ 200：收集中，0 条", self.send.await_args.args[0])
+        self.assertFalse((await self.command("/distill list", user="901", group=None))[0])
+
+    async def test_anyone_can_opt_out_only_for_themselves(self):
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        await self.plugin.on_receive(message=message(user="200", mid="a", text="你好"))
+        self.assertTrue((await self.command("/distill export 200", group=None))[0])
+        exports = Path(self.tmp.name) / "exports"
+        self.assertEqual(len(list(exports.glob("*.txt"))), 1)
+        # Another user's opt-out and a QQ argument do not touch 200.
+        self.assertTrue((await self.command("/distill optout", user="301", group=None))[0])
+        self.assertFalse((await self.command("/distill optout 200", user="301", group=None))[0])
+        self.assertEqual(self.plugin._store.count("200"), 1)
+        self.assertTrue((await self.command("/distill optout", user="200", group="100"))[0])
+        self.assertEqual(self.plugin._store.count("200"), 0)
+        self.assertEqual(list(exports.glob("*.txt")), [])
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        self.assertIn("主动退出", self.send.await_args.args[0])
+        self.assertFalse(self.plugin._store.is_enabled("200"))
+        self.assertTrue((await self.command("/distill optin", user="200", group=None))[0])
+        self.assertFalse(self.plugin._store.is_enabled("200"))
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        self.assertTrue(self.plugin._store.is_enabled("200"))
+
+    async def test_export_does_not_hold_collection_lock(self):
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        store = self.plugin._store
+        started, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        real_export = store.export_text
+
+        def slow_export(*args):
+            loop.call_soon_threadsafe(started.set)
+            release.wait(5)
+            return real_export(*args)
+
+        store.export_text = slow_export
+        export = asyncio.create_task(self.command("/distill export 200", group=None))
+        await asyncio.wait_for(started.wait(), 5)
+        await asyncio.wait_for(self.plugin.on_receive(message=message(user="200", mid="during", text="导出中")), 5)
+        self.assertEqual(store.count("200"), 1)
+        # Deleting waits for the export, so no file with deleted data appears afterwards.
+        delete = asyncio.create_task(self.command("/distill delete 200", group=None))
+        await asyncio.sleep(0.05)
+        self.assertFalse(delete.done())
+        release.set()
+        await asyncio.wait_for(asyncio.gather(export, delete), 5)
+        self.assertEqual(list((Path(self.tmp.name) / "exports").glob("*.txt")), [])
+
+    async def test_retention_removes_old_messages_and_exports(self):
+        self.assertTrue((await self.command("/distill add 200", group=None))[0])
+        await self.plugin.on_receive(message=message(user="200", mid="a", text="你好"))
+        self.assertTrue((await self.command("/distill export 200", group=None))[0])
+        export = next((Path(self.tmp.name) / "exports").glob("*.txt"))
+        await self.plugin._run_maintenance()
+        self.assertEqual(self.plugin._store.count("200"), 1)
+        self.assertTrue(export.exists())
+        later = time.time() + 86400 * 181
+        with patch("maibot_member_distiller.storage.time.time", return_value=later), \
+                patch("maibot_member_distiller.plugin.time.time", return_value=later):
+            await self.plugin._run_maintenance()
+        self.assertEqual(self.plugin._store.count("200"), 0)
+        self.assertFalse(export.exists())

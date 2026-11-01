@@ -4,3 +4,6 @@ config_version = "1.0.0"
 
 [collector]
 allowed_qq = []
+retention_days = 180  # 资料和导出文件的保留天数；0 表示不自动删除
+ignore_words = []     # 包含这些词的消息不收集
+ignore_regex = []     # 匹配这些正则的消息不收集
