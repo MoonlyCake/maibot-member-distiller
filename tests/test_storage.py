@@ -1,4 +1,4 @@
-import json
+from datetime import datetime
 import os
 import sqlite3
 from pathlib import Path
@@ -40,29 +40,25 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(again.is_enabled("user1"))
         self.assertEqual(again.count("user1"), 2)
         self.assertEqual(again.list_targets()[0]["count"], 2)
-        self.assertEqual(again.delete_messages("user1"), 2)
+        self.assertEqual(again.delete_target("user1"), 2)
         self.assertEqual(again.count("user1"), 0)
+        self.assertEqual(again.list_targets(), [])
 
-    def test_export_scoped_order_range_and_permissions(self):
+    def test_export_scoped_order_and_permissions(self):
         store = self.store
         store.set_target("20", True)
         store.set_target("21", True)
         for group, mid, ts in (("10", "late", 3), ("11", "first", 1), ("10", "second", 2)):
-            store.record(group, "20", mid, f"文字 {mid}\n第二行", ts, received_at=10)
+            store.record(group, "20", mid, f"文字 {mid}", ts, received_at=10)
         store.record("10", "21", "other", "must not leak", 2, received_at=10)
-        out = self.root / "exports" / "messages.jsonl"
-        self.assertEqual(store.export_jsonl("20", out, 1, 3), 2)
-        rows = [json.loads(line) for line in out.read_text().splitlines()]
-        self.assertEqual([r["message_id"] for r in rows], ["first", "second"])
-        self.assertEqual(rows[0]["text"], "文字 first\n第二行")
-        self.assertEqual(rows[0]["group_id"], "11")
-        self.assertEqual(rows[0]["user_id"], "20")
+        out = self.root / "exports" / "messages.txt"
+        self.assertEqual(store.export_text("20", out), 3)
+        text = out.read_text(encoding="utf-8")
+        self.assertLess(text.index("文字 first"), text.index("文字 second"))
+        self.assertLess(text.index("文字 second"), text.index("文字 late"))
+        self.assertNotIn("must not leak", text)
         self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
         self.assertEqual(os.stat(self.db_path).st_mode & 0o777, 0o600)
-        with self.assertRaises(ValueError):
-            store.export_jsonl("20", out, 3, 3)
-        with self.assertRaises(ValueError):
-            store.export_jsonl("20", self.db_path)
 
     def test_cutoff_source_timestamp_and_restart(self):
         store = self.store
@@ -94,7 +90,7 @@ class StorageTests(unittest.TestCase):
         text = out.read_text(encoding="utf-8")
         self.assertIn("目标 QQ：20", text)
         self.assertIn("原始文本发言", text)
-        self.assertIn("时间：1970-01-01T00:00:02+00:00", text)
+        self.assertIn(f"时间：{datetime.fromtimestamp(2).astimezone().isoformat(timespec='seconds')}", text)
         self.assertIn("来源群：10", text)
         self.assertIn("来源群：11", text)
         self.assertIn("第一句\n第二行", text)
@@ -137,10 +133,10 @@ class StorageTests(unittest.TestCase):
         for excluded in ("before enabling", "too old", "wrong group", "sender3", "sender4"):
             self.assertNotIn(excluded, data)
         with sqlite3.connect(self.db_path) as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM message_context WHERE target_message_id='f'").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM message_context WHERE target_message_id='f'").fetchone()[0], 1)
             columns = [row[1] for row in db.execute("PRAGMA table_info(message_context)")]
             self.assertNotIn("user_id", columns)
-        self.assertEqual(store.delete_messages("target"), 2)
+        self.assertEqual(store.delete_target("target"), 2)
         with sqlite3.connect(self.db_path) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM message_context").fetchone()[0], 0)
 
@@ -160,9 +156,9 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(len(store._context), 0)
             store.set_target("t", True)
             store.observe("g", "t", "after", "after resume", 1003, received_at=1003)
-            store.export_jsonl("t", self.root / "c.jsonl")
-            rows = [json.loads(line) for line in (self.root / "c.jsonl").read_text().splitlines()]
-            self.assertEqual(rows[-1]["context"], [])
+            with sqlite3.connect(self.db_path) as db:
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) FROM message_context WHERE target_message_id='after'").fetchone()[0], 0)
             for n in range(300):
                 store.observe(str(n), "u", str(n), "value", 1004, received_at=1004)
             self.assertLessEqual(len(store._context), 256)
@@ -207,6 +203,97 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(upgraded.export_text("t", out), 1)
         self.assertIn("old message", out.read_text(encoding="utf-8"))
         self.assertTrue(upgraded.is_enabled("t"))
+
+    def test_context_is_attached_once_during_a_burst(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.store.set_target("t", True)
+            self.store.observe("g", "u1", "a", "路人甲", 1001, received_at=1001)
+            self.store.observe("g", "u2", "b", "路人乙", 1002, received_at=1002)
+            for n in range(5):
+                self.assertTrue(self.store.observe("g", "t", f"t{n}", f"目标{n}", 1003 + n, received_at=1003 + n))
+        with sqlite3.connect(self.db_path) as db:
+            rows = db.execute("SELECT target_message_id, text FROM message_context ORDER BY position").fetchall()
+        self.assertEqual(rows, [("t0", "路人甲"), ("t0", "路人乙")])
+
+    def test_works_without_fchmod(self):
+        # Windows before Python 3.13 has no os.fchmod.
+        with patch("storage.os") as fake_os:
+            fake_os.configure_mock(**{name: getattr(os, name) for name in (
+                "open", "close", "fdopen", "fsync", "replace", "unlink",
+                "O_CREAT", "O_RDWR", "O_NOFOLLOW")})
+            del fake_os.fchmod
+            store = DistillStore(self.root / "nofchmod.sqlite3")
+            store.set_target("t", True)
+            self.assertEqual(store.export_text("t", self.root / "nofchmod.txt"), 0)
+
+    def test_adding_active_target_keeps_start_and_context(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.assertTrue(self.store.set_target("t", True))
+            self.store.observe("g", "u", "a", "路人", 1001, received_at=1001)
+        with patch("storage.time.time", return_value=1002.0):
+            self.assertFalse(self.store.set_target("t", True))
+            self.assertEqual(self.store._targets["t"], 1000.0)
+            self.assertIn(("t", "g"), self.store._context)
+
+    def test_target_text_is_capped(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.store.set_target("t", True)
+            self.store.observe("g", "t", "m", "x" * 5000, 1001, received_at=1001)
+        with sqlite3.connect(self.db_path) as db:
+            stored = db.execute("SELECT text FROM messages").fetchone()[0]
+        self.assertTrue(stored.startswith("x" * 2000))
+        self.assertNotIn("x" * 2001, stored)
+        self.assertIn("发言过长", stored)
+
+    def test_forget_message_before_or_after_observe(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.store.set_target("t", True)
+            self.store.observe("g", "t", "a", "#签到", 1001, received_at=1001)
+            self.store.observe("g", "u", "b", "#打卡", 1001, received_at=1001)
+            self.store.forget_message("g", "a")
+            self.store.forget_message("g", "b")
+            self.assertEqual(self.store.count("t"), 0)
+            self.assertNotIn(("t", "g"), self.store._context)
+            self.store.forget_message("g", "c")
+            self.assertFalse(self.store.observe("g", "t", "c", "#迟到", 1002, received_at=1002))
+            self.assertEqual(self.store.count("t"), 0)
+
+    def test_opt_out_removes_data_and_blocks_until_opt_in(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.store.set_target("t", True)
+            self.store.observe("g", "t", "a", "你好", 1001, received_at=1001)
+            self.assertEqual(self.store.opt_out("t"), 1)
+        self.assertTrue(self.store.is_opted_out("t"))
+        self.assertTrue(DistillStore(self.db_path).is_opted_out("t"))
+        self.assertEqual(self.store.list_targets(), [])
+        self.assertFalse(self.store.has_targets)
+        self.store.opt_in("t")
+        self.assertFalse(self.store.is_opted_out("t"))
+
+    def test_prune_expired(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.store.set_target("kept", True)
+            self.store.set_target("gone", True)
+            self.store.record("g", "kept", "old", "旧", 1001, received_at=1001)
+            self.store.record("g", "gone", "old2", "旧", 1001, received_at=1001)
+            self.store.set_target("gone", False)
+        with patch("storage.time.time", return_value=1000.0 + 86400 * 2):
+            self.store.record("g", "kept", "new", "新", 1000 + 86400 * 2, received_at=1000 + 86400 * 2)
+            self.assertEqual(self.store.prune_expired(0), 0)
+            self.assertEqual(self.store.prune_expired(1), 2)
+        self.assertEqual(self.store.count("kept"), 1)
+        self.assertEqual([item["user_id"] for item in self.store.list_targets()], ["kept"])
+
+    def test_export_does_not_block_writer(self):
+        with patch("storage.time.time", return_value=1000.0):
+            self.store.set_target("t", True)
+            self.store.record("g", "t", "a", "一", 1001, received_at=1001)
+            reader = sqlite3.connect(self.db_path)
+            self.addCleanup(reader.close)
+            reader.execute("BEGIN")
+            reader.execute("SELECT COUNT(*) FROM messages").fetchone()
+            self.assertTrue(self.store.record("g", "t", "b", "二", 1002, received_at=1002))
+            self.assertEqual(reader.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

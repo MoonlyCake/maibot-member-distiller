@@ -3,7 +3,7 @@
   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-night.svg"><img src="docs/readme/hero-day.svg" alt="麦麦插件 · 群友蒸馏：把群友说过的话，酿成麦麦的说话方式" width="100%"></picture>
 
   <p>
-    <img src="https://img.shields.io/badge/版本-1.1.1-8fd6a0?style=flat-square&labelColor=5a544a" alt="版本 1.1.1">
+    <img src="https://img.shields.io/badge/版本-1.2.0-8fd6a0?style=flat-square&labelColor=5a544a" alt="版本 1.2.0">
     <img src="https://img.shields.io/badge/MaiBot-1.3.12+-ffd84a?style=flat-square&labelColor=5a544a" alt="MaiBot 1.3.12+">
     <img src="https://img.shields.io/badge/SDK-2.12+-ffd84a?style=flat-square&labelColor=5a544a" alt="SDK 2.12+">
     <img src="https://img.shields.io/badge/大模型调用-0-f08a5d?style=flat-square&labelColor=5a544a" alt="不调用大模型">
@@ -66,16 +66,22 @@ config_version = "1.0.0"
 
 [collector]
 allowed_qq = ["123456789"]  # 换成允许管理插件的 QQ 号
+retention_days = 180        # 资料和导出文件的保留天数；0 表示不自动删除
+ignore_words = []           # 包含这些词的消息不收集
+ignore_regex = []           # 匹配这些正则的消息不收集
 ```
 
 > [!NOTE]
 > QQ 号必须写成纯数字字符串。白名单为空时，任何人都不能管理插件；需要多位管理员时，可以填写多个 QQ 号。
 
+> [!TIP]
+> 麦麦自身的屏蔽词在插件收到消息之后才生效，插件也读不到这份配置。如果不希望这些消息进入资料，请把它们同样填进 `ignore_words` 或 `ignore_regex`。
+
 <br>
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/sec-usage-night.svg"><img src="docs/readme/sec-usage-day.svg" alt="指令 · USAGE" width="100%"></picture>
 
-由白名单中的 QQ，在机器人私聊或任意可用群聊中发送纯文字指令（把 `123456789` 换成目标 QQ；导出仅支持私聊）：
+由白名单中的 QQ，在机器人私聊或任意可用群聊中发送纯文字指令（把 `123456789` 换成目标 QQ；导出和名单仅支持私聊）：
 
 | 指令 | 作用 |
 | :--- | :--- |
@@ -83,14 +89,23 @@ allowed_qq = ["123456789"]  # 换成允许管理插件的 QQ 号
 | 🔍 `/distill status 123456789` | 查看收集状态与已记录条数 |
 | ⏸️ `/distill stop 123456789` | 停止收集，已有资料会保留 |
 | 📜 `/distill export 123456789` | 在私聊中导出 UTF-8 TXT，并回复它在机器人本机上的路径 |
-| 🧹 `/distill delete 123456789` | 停止并删除数据库中该 QQ 的记录（已导出的文件需自行删除） |
+| 🧹 `/distill delete 123456789` | 停止收集，并删除该 QQ 的记录和导出文件 |
+| 📋 `/distill list` | 在私聊中查看所有收集目标 |
+
+任何群友都可以直接发送下面的指令，它们只作用于发送者自己的 QQ，不需要白名单：
+
+| 指令 | 作用 |
+| :--- | :--- |
+| 🚪 `/distill optout` | 退出收集，删除自己的记录和导出文件；之后管理员无法再添加 |
+| 🔓 `/distill optin` | 取消退出；要重新收集仍需管理员添加 |
 
 <details>
 <summary><b>收集范围的小细节</b></summary>
 <br>
 
 - 可以同时收集多位群友。
-- 目标发言可附带同一群此前五分钟内最多两条其他群成员的文字；上下文以匿名群友标注，不保存他们的 QQ 号。每条上下文最多保存 2000 字，超出时会标注截断。
+- 目标发言可附带同一群此前五分钟内最多两条其他群成员的文字；上下文以匿名群友标注，不保存他们的 QQ 号。同一条上下文只附带一次。目标发言和上下文每条最多保存 2000 字，超出时会标注截断。
+- 麦麦已注册的命令和麦麦自己发的消息不收集。
 - 其他群成员的文字先短暂留在有数量上限的内存缓存中，只有作为目标发言的上下文时才保存。导出会明确区分目标发言与上下文。
 - 上下文可能因消息并发、缓存淘汰或重启而不完整。目标的私聊、图片、语音、引用内容和以 `/` 开头的指令不收集，也不回溯历史消息。
 - 导出内容会保留来源群、消息 ID 和时间。
@@ -114,7 +129,8 @@ allowed_qq = ["123456789"]  # 换成允许管理插件的 QQ 号
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/sec-privacy-night.svg"><img src="docs/readme/sec-privacy-day.svg" alt="数据与隐私 · PRIVACY" width="100%"></picture>
 
-- 数据库和导出文件保存在麦麦分配的 `data/plugins/com.moonlycake.member-distiller/` 下，权限仅本机文件所有者可读写。
+- 数据库和导出文件保存在麦麦分配的 `data/plugins/com.moonlycake.member-distiller/` 下，权限仅本机文件所有者可读写。Windows 上的访问权限由所在目录决定。
+- 超过 `retention_days`（默认 180 天）的资料和导出文件会自动删除。
 - 上传给大模型之前，请先翻一遍样本，确认里面没有不适合分享的内容。
 - 收集的是一位真实群友的发言，建议先和 TA 打个招呼，得到同意再开始 🌷
 
